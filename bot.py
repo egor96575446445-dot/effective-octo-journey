@@ -1,220 +1,224 @@
+import os
 import requests
 import time
-import random
-import re
+import json
+from datetime import datetime
 
-TOKEN = "8797631228:AAH5ddV8v1FwQ0ACsn-vDPWjDFdQdR7Xq80"
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 LAST_UPDATE_ID = 0
+ADMINS = [7533851056]
+TICKETS_FILE = "tickets.json"
+FAQ_FILE = "faq.json"
 
-def send_message(chat_id, text):
+def send_message(chat_id, text, reply_markup=None):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     try:
-        requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=5)
-        print(f"✅ Отправлено")
+        data = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+        if reply_markup:
+            data["reply_markup"] = reply_markup
+        requests.post(url, json=data, timeout=10)
+        print("✅ Отправлено")
     except Exception as e:
         print(f"❌ Ошибка: {e}")
 
 def send_buttons(chat_id, text):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     reply_markup = {
         "keyboard": [
-            ["🔍 Поиск", "📊 Пример", "😂 Шутка"],
-            ["💻 Код", "📰 Новости", "💰 Курс"],
-            ["🌤️ Погода", "🎵 Музыка", "⏰ Напомни"],
-            ["❓ Помощь", "ℹ️ Инфо", "🎨 Нарисовать"]
+            ["❓ Частые вопросы", "📋 Создать тикет"],
+            ["📜 Мои тикеты", "ℹ️ О сервере"],
+            ["🌐 Сайт", "📢 Новости"]
         ],
         "resize_keyboard": True
     }
-    try:
-        requests.post(url, json={"chat_id": chat_id, "text": text, "reply_markup": reply_markup}, timeout=5)
-    except:
-        pass
+    send_message(chat_id, text, reply_markup)
 
 def get_updates():
     global LAST_UPDATE_ID
     url = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
-    params = {"offset": LAST_UPDATE_ID, "timeout": 15}
+    params = {"offset": LAST_UPDATE_ID, "timeout": 10}
     try:
-        r = requests.get(url, params=params, timeout=20)
+        r = requests.get(url, params=params, timeout=15)
         if r.status_code == 200:
             return r.json()
         return {"ok": False}
-    except:
+    except Exception as e:
+        print(f"⚠️ Ошибка: {e}")
         return {"ok": False}
 
-def generate_image(prompt):
+def save_ticket(ticket):
     try:
-        encoded = requests.utils.quote(prompt)
-        url = f"https://image.pollinations.ai/prompt/{encoded}?width=512&height=512"
-        response = requests.get(url, timeout=30)
-        if response.status_code == 200:
-            return response.content
-        return None
+        with open(TICKETS_FILE, "r", encoding="utf-8") as f:
+            tickets = json.load(f)
     except:
-        return None
+        tickets = []
+    tickets.append(ticket)
+    with open(TICKETS_FILE, "w", encoding="utf-8") as f:
+        json.dump(tickets, f, ensure_ascii=False, indent=2)
 
-def send_photo(chat_id, photo_data, caption=""):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
+def load_tickets(user_id=None):
     try:
-        files = {"photo": ("image.jpg", photo_data, "image/jpeg")}
-        data = {"chat_id": chat_id, "caption": caption}
-        requests.post(url, data=data, files=files, timeout=30)
-        return True
+        with open(TICKETS_FILE, "r", encoding="utf-8") as f:
+            tickets = json.load(f)
+        if user_id:
+            return [t for t in tickets if t.get("user_id") == user_id]
+        return tickets
     except:
-        return False
+        return []
 
-def ai_response(message, username):
+def update_ticket(ticket_id, status, admin_response=None):
+    try:
+        with open(TICKETS_FILE, "r", encoding="utf-8") as f:
+            tickets = json.load(f)
+        for t in tickets:
+            if t.get("id") == ticket_id:
+                t["status"] = status
+                if admin_response:
+                    t["admin_response"] = admin_response
+                    t["response_time"] = datetime.now().isoformat()
+                break
+        with open(TICKETS_FILE, "w", encoding="utf-8") as f:
+            json.dump(tickets, f, ensure_ascii=False, indent=2)
+    except:
+        pass
+
+def load_faq():
+    default_faq = {
+        "Как зайти на сервер?": "IP: arm-mine.ru\nПорт: 19132",
+        "Как создать тикет?": "Нажми '📋 Создать тикет' и напиши: Тема: текст",
+        "Правила сервера": "1. Не гриферить\n2. Не использовать читы\n3. Уважать игроков"
+    }
+    try:
+        with open(FAQ_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        with open(FAQ_FILE, "w", encoding="utf-8") as f:
+            json.dump(default_faq, f, ensure_ascii=False, indent=2)
+        return default_faq
+
+def send_to_admins(ticket_info, user_info):
+    message = f"""🆕 *НОВЫЙ ТИКЕТ!* 🆕
+
+📋 *ID:* `{ticket_info['id']}`
+👤 *От:* {user_info.get('first_name', 'Неизвестно')}
+📝 *Тема:* {ticket_info.get('subject')}
+📄 *Сообщение:* {ticket_info.get('message')}
+
+💬 *Ответь:* /answer_{ticket_info['id']} [текст]"""
+    for admin_id in ADMINS:
+        send_message(admin_id, message)
+
+def generate_ticket_id():
+    return len(load_tickets()) + 1
+
+def ai_response(message, username, user_id):
     msg = message.lower().strip()
     
-    # Обработка кнопок с эмодзи
-    if "🔍 поиск" in msg or msg == "поиск":
-        return "🔍 *Что ищем?*\n\nНапиши: *найди Python*"
-    
-    if "📊 пример" in msg or msg == "пример":
-        return "📊 *Напиши пример:*\n\nНапример: *15 + 30*"
-    
-    if "😂 шутка" in msg or msg == "шутка":
-        jokes = [
-            "🐍 Почему Python популярен? Потому что он удав!",
-            "💡 Сколько программистов нужно для лампочки? Ни одного!",
-            "🌍 Hello, World! — первое слово каждого программиста!"
-        ]
-        return f"😂 {random.choice(jokes)}"
-    
-    if "💻 код" in msg or msg == "код":
-        return "💻 *Напиши, что создать:*\n\n• калькулятор\n• игру\n• бота"
-    
-    if "📰 новости" in msg or msg == "новости":
-        return "📰 *Новости*\n\n• Python 3.15 вышел\n• ИИ развивается\n• Render.com — отличный хостинг!"
-    
-    if "💰 курс" in msg or msg == "курс валют" or msg == "курс":
-        return "💰 *Курс валют*\n\n💵 Доллар: ~90 руб\n💶 Евро: ~98 руб"
-    
-    if "🌤️ погода" in msg or msg == "погода":
-        return "🌤️ *Погода*\n\nНапиши: *погода Москва*"
-    
-    if "🎵 музыка" in msg or msg == "музыка":
-        return "🎵 *Музыка*\n\nНапиши: *музыка Imagine Dragons*"
-    
-    if "⏰ напомни" in msg or msg.startswith("напомни"):
-        return "⏰ *Напоминания*\n\nНапиши: *напомни купить хлеб через 10 мин*"
-    
-    if "❓ помощь" in msg or msg == "помощь" or msg == "/help":
-        return """📖 *Команды:*
-
-🎨 нарисуй кота
-😂 шутка
-🔍 найди Python
-📊 15 + 30
-🌤️ погода Москва
-💰 курс валют
-📰 новости
-🎵 музыка Imagine Dragons
-⏰ напомни... через 10 мин
-📅 сколько время"""
-    
-    if "ℹ️ инфо" in msg or msg == "инфо" or msg == "/info":
-        return "ℹ️ *SimpleBot*\n\n✅ Работаю 24/7\n🎨 Генерация картинок\n🐍 Python 3.14\n📍 Хостинг: Render.com"
-    
-    if "🎨 нарисовать" in msg:
-        return "🎨 *Что нарисовать?*\n\nНапиши: *нарисуй кота в космосе*"
-    
-    # Приветствия
-    if msg in ["привет", "здравствуй", "хай", "hello", "ку", "здаров"]:
-        return f"Привет, {username}! 👋\n\nЯ работаю 24/7!\n\n• нарисуй кота\n• шутка\n• помощь"
-    
-    if "как дела" in msg:
-        return f"У меня всё отлично, {username}! А у тебя? 😊"
-    
-    if "спасибо" in msg:
-        return f"Пожалуйста, {username}! 😊"
-    
-    if "пока" in msg:
-        return f"До свидания, {username}! 👋"
-    
-    # Генерация картинок
-    if "нарисуй" in msg or "сгенерируй" in msg:
-        prompt = re.sub(r'^(нарисуй|сгенерируй)\s*', '', message).strip()
-        if prompt and len(prompt) > 2:
-            send_message(username, f"🎨 Рисую: {prompt}...")
-            image = generate_image(prompt)
-            if image:
-                send_photo(username, image, f"🎨 {prompt}")
-                return None
-            return "❌ Не удалось нарисовать. Попробуй другой запрос!"
-        return "🎨 Напиши: *нарисуй кота в космосе*"
-    
-    # Поиск
-    if "найди" in msg:
-        query = message.replace("найди", "").strip()
-        if query:
-            return f"🔍 *{query}*\n\nИщу в интернете...\n(скоро добавлю полноценный поиск)"
-        return "🔍 Напиши: *найди Python*"
-    
-    # Математика
-    if "+" in msg:
-        try:
-            parts = msg.split("+")
-            if len(parts) == 2:
-                a = int(parts[0].strip())
-                b = int(parts[1].strip())
-                return f"📊 {a} + {b} = {a + b} ✅"
-        except:
-            pass
-    
-    if "-" in msg:
-        try:
-            parts = msg.split("-")
-            if len(parts) == 2:
-                a = int(parts[0].strip())
-                b = int(parts[1].strip())
-                return f"📊 {a} - {b} = {a - b} ✅"
-        except:
-            pass
-    
-    # /start
     if msg == "/start":
-        return f"🌟 Привет, {username}! 🌟\n\nЯ SimpleBot — твой помощник!\n\n👇 Используй кнопки ниже!"
+        return f"🌟 *Добро пожаловать в ArmMine, {username}!* 🌟\n\n🛡️ *Бот поддержки*\n\nВыбери пункт в меню 👇", "buttons"
     
-    # Стандартный ответ
-    return f"📝 {username}, ты написал: {message}\n\nНапиши *помощь* для списка команд!"
+    if message == "❓ Частые вопросы":
+        faq = load_faq()
+        text = "📚 *Часто задаваемые вопросы:*\n\n"
+        for i, (q, a) in enumerate(faq.items(), 1):
+            text += f"{i}. *{q}*\n   {a}\n\n"
+        return text
+    
+    if message == "ℹ️ О сервере":
+        return """ℹ️ *О сервере ArmMine*
+
+🎮 Версия: Minecraft Bedrock 1.20+
+🌐 IP: arm-mine.ru
+🔌 Порт: 19132"""
+    
+    if message == "🌐 Сайт":
+        return "🌐 *Наш сайт:* arm-mine.ru"
+    
+    if message == "📢 Новости":
+        return """📢 *НОВОСТИ БОТА*
+
+✅ Бот поддержки работает
+✅ Система тикетов
+✅ FAQ
+✅ Умные кнопки
+
+🤖 ArmMine Bot — всегда поможет!"""
+    
+    if message == "📋 Создать тикет" or msg == "/new":
+        return "📋 *Создание тикета*\n\nНапиши в формате:\n`Тема: текст`\n\n📌 Пример: `Проблема с донатом: не пришёл`"
+    
+    if ":" in message and len(message) > 5 and message not in ["❓ Частые вопросы", "📋 Создать тикет", "📜 Мои тикеты", "ℹ️ О сервере", "🌐 Сайт", "📢 Новости"]:
+        parts = message.split(":", 1)
+        subject = parts[0].strip()
+        body = parts[1].strip()
+        
+        ticket_id = generate_ticket_id()
+        ticket = {"id": ticket_id, "user_id": user_id, "username": username, "subject": subject, "message": body, "time": datetime.now().strftime('%d.%m.%Y %H:%M:%S'), "status": "открыт"}
+        save_ticket(ticket)
+        send_to_admins(ticket, {"id": user_id, "first_name": username})
+        return f"✅ *Тикет #{ticket_id} создан!* Администратор скоро ответит."
+    
+    if message == "📜 Мои тикеты" or msg == "/mytickets":
+        tickets = load_tickets(user_id)
+        if not tickets:
+            return "📜 *У тебя пока нет тикетов*"
+        text = "📜 *Твои тикеты:*\n\n"
+        for t in tickets:
+            status_emoji = "🟢" if t["status"] == "открыт" else "🔴"
+            text += f"{status_emoji} *#{t['id']}* — {t['subject']} (статус: {t['status']})\n"
+        return text
+    
+    if msg.startswith("/answer_"):
+        if user_id not in ADMINS:
+            return "⛔ Нет прав!"
+        try:
+            parts = msg.split(" ", 1)
+            ticket_id = int(parts[0].replace("/answer_", ""))
+            admin_text = parts[1] if len(parts) > 1 else ""
+            if not admin_text:
+                return "❌ Используй: /answer_123 Твой ответ"
+            tickets = load_tickets()
+            for t in tickets:
+                if t.get("id") == ticket_id:
+                    update_ticket(ticket_id, "отвечен", admin_text)
+                    send_message(t["user_id"], f"📨 *Ответ администратора* на тикет #{ticket_id}\n\n{admin_text}")
+                    return f"✅ Ответ отправлен на тикет #{ticket_id}"
+            return f"❌ Тикет #{ticket_id} не найден"
+        except:
+            return "❌ Используй: /answer_123 Твой ответ"
+    
+    return f"📝 {username}, выбери пункт в меню или /help"
 
 print("="*50)
-print("🤖 SIMPLEBOT ЗАПУЩЕН!")
-print("✅ @SimpleBot_2025_bot")
-print("🎨 Генерация картинок: ВКЛ")
-print("🔘 Кнопки: ВКЛ")
+print("🤖 ARMMINE - БОТ ПОДДЕРЖКИ")
+print("="*50)
+print("✅ @ArmMine_Bot")
+print("🛑 Остановка: Ctrl+C")
 print("="*50)
 
-# Отправляем приветствие с кнопками
-print("🚀 Бот готов к работе!")
-
-while True:
-    try:
-        data = get_updates()
-        
-        if data and data.get("ok") and data.get("result"):
-            for update in data["result"]:
-                LAST_UPDATE_ID = update["update_id"] + 1
-                
-                if "message" in update and update["message"].get("text"):
-                    msg = update["message"]
-                    chat_id = msg["chat"]["id"]
-                    text = msg["text"]
-                    username = msg["chat"].get("first_name", "User")
-                    
-                    print(f"📨 {username}: {text}")
-                    
-                    response = ai_response(text, username)
-                    if response:
-                        # Если команда /start - отправляем с кнопками
-                        if text == "/start":
-                            send_buttons(chat_id, response)
-                        else:
-                            send_message(chat_id, response)
-        
-        time.sleep(0.5)
-        
-    except Exception as e:
-        print(f"Ошибка: {e}")
-        time.sleep(1)
+try:
+    while True:
+        try:
+            data = get_updates()
+            if data and data.get("ok") and data.get("result"):
+                for update in data["result"]:
+                    LAST_UPDATE_ID = update["update_id"] + 1
+                    if "message" in update and update["message"].get("text"):
+                        msg = update["message"]
+                        chat_id = msg["chat"]["id"]
+                        text = msg["text"]
+                        username = msg["chat"].get("first_name", "User")
+                        user_id = msg["chat"]["id"]
+                        print(f"📨 {username}: {text}")
+                        response = ai_response(text, username, user_id)
+                        if response:
+                            if isinstance(response, tuple):
+                                send_buttons(chat_id, response[0])
+                            else:
+                                send_message(chat_id, response)
+            time.sleep(0.5)
+        except Exception as e:
+            print(f"⚠️ Ошибка: {e}")
+            time.sleep(1)
+except KeyboardInterrupt:
+    print("\n🛑 Бот остановлен!")
+  
